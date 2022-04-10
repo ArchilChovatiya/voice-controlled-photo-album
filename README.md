@@ -1,4 +1,4 @@
-# Demo-url: 
+# Demo-URL: 
 https://smart-photo-album-ac9137.s3.amazonaws.com/index.html
 
 # AWS-Photo-Album---Using-Transcribe-Rekognition
