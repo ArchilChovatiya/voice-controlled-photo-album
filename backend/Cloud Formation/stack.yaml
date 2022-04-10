@@ -1,0 +1,281 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: The infrastructure for voice-controlled photo album.
+Parameters:
+  S3BucketNameB2:
+    Description: The name of the S3 bucket to be created.
+    Type: String
+    Default: index-photos-bucket-b2
+Resources:
+  # S3 Bucket: B2
+  # The bucket and it's policies for letting access to LF1.
+  S3BucketForPhotosB2:
+    Type: 'AWS::S3::Bucket'
+    DependsOn: PermissionForS3ToLF1
+    Properties:
+      BucketName: !Ref smart-photo-album-ac9137
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt LambdaFunctionLF1.Arn
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - PUT
+            AllowedOrigins:
+              - '*'
+            ExposedHeaders:
+              - ETag
+
+  S3BucketB2Policy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3BucketForPhotosB2
+      PolicyDocument:
+        {
+          'Statement':
+            [
+              {
+                'Effect': 'Allow',
+                'Principal': { 'AWS': '*' },
+                'Action': 's3:ListBucket',
+                'Resource':
+                  {
+                    'Fn::Join':
+                      ['', ['arn:aws:s3:::', { 'Ref': 'S3BucketForPhotosB2' }]],
+                  },
+              },
+              {
+                'Effect': 'Allow',
+                'Principal': { 'AWS': '*' },
+                'Action': ['s3:GetObject', 's3:PutObject'],
+                'Resource':
+                  {
+                    'Fn::Join':
+                      [
+                        '',
+                        [
+                          'arn:aws:s3:::',
+                          { 'Ref': 'S3BucketForPhotosB2' },
+                          '/*',
+                        ],
+                      ],
+                  },
+              },
+            ],
+        }
+
+  # Lambda Function: LF1 for storing the photo in elastic search domain with labels
+  LambdaExecutionRoleLF1:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: 'The execution role for the lambda LF1. This is the master arn role as well.'
+      Path: '/'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: 'LambdaLF1Policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${S3BucketNameB2}'
+              - Effect: Allow
+                Action:
+                  - rekognition:DetectLabels
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - es:ESHttpPut
+                  - es:ESHttpPost
+                Resource: '*'
+      RoleName: 'LambdaExecutionRoleLF1'
+  LambdaFunctionLF1:
+    Type: 'AWS::Lambda::Function'
+    DependsOn: LambdaExecutionRoleLF1
+    Properties:
+      FunctionName: 'Assignment2_LF1'
+      Description: 'Function to detect labels from photos and add it to ElasticSearch. It is automatically trigerred by S3.'
+      Role: !GetAtt LambdaExecutionRoleLF1.Arn
+      Code:
+        S3Bucket: 'lambda-bucket-assignment2'
+        S3Key: Assignment2_LF1.zip
+      Handler: lambda_function.lambda_handler
+      Runtime: 'python3.8'
+      MemorySize: 128
+      Timeout: 10
+      Environment:
+        Variables:
+          ESPhotosEndpoint: !GetAtt ElasticSearchPhotos.DomainEndpoint
+          AUTH_USER: <Username>
+          AUTH_PASS: <Password>
+  PermissionForS3ToLF1:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref LambdaFunctionLF1
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !Sub 'arn:aws:s3:::${S3BucketNameB2}'
+  LogGroupLF1:
+    Type: 'AWS::Logs::LogGroup'
+    DependsOn: LambdaFunctionLF1
+    Properties:
+      LogGroupName: !Join
+        - ''
+        - - '/aws/lambda/'
+          - !Ref LambdaFunctionLF1
+      RetentionInDays: 7
+  # search-photos lambda function for interaction with elasticsearch, and lex bot
+  LambdaExecutionRoleLF2:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: 'The execution role for the lambda LF2.'
+      Path: '/'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: 'LambdaLF2Policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - es:ESHttpGet
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - lex:PostText
+                Resource: '*'
+      RoleName: 'LambdaExecutionRoleLF2'
+      Tags:
+        - Key: Name
+          Value: 'LambdaExecutionRoleLF2'
+        - Key: CreatedBy
+          Value: 'PrateekD'
+  LambdaFunctionLF2:
+    Type: 'AWS::Lambda::Function'
+    # DependsOn: LambdaExecutionRoleLF2
+    DependsOn: LambdaExecutionRoleLF1
+    Properties:
+      FunctionName: 'Assignment2_LF2'
+      Description: 'Function to search photos based on keywords extracted from lex bot and fetch the same from elasticsearch.'
+      Role: !GetAtt LambdaExecutionRoleLF2.Arn
+      Code:
+        S3Bucket: 'lambda-bucket-assignment2'
+        S3Key: Assignment2_LF2.zip
+      Handler: lambda_function.lambda_handler
+      Runtime: 'python3.8'
+      MemorySize: 128
+      Timeout: 10
+      Environment:
+        Variables:
+          ESPhotosEndpoint: !GetAtt ElasticSearchPhotos.DomainEndpoint
+          AUTH_USER: <Username>
+          AUTH_PASS: <Password>
+  LogGroupLF2:
+    Type: 'AWS::Logs::LogGroup'
+    DependsOn: LambdaFunctionLF2
+    Properties:
+      LogGroupName: !Join
+        - ''
+        - - '/aws/lambda/'
+          - !Ref LambdaFunctionLF2
+      RetentionInDays: 7
+
+  ElasticSearchPhotos:
+    Type: AWS::Elasticsearch::Domain
+    Properties:
+      AccessPolicies:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: '*'
+            Action: es:ESHttp*
+            Resource: 'arn:aws:es:us-east-1:996208533033:domain/photos/*'
+      # AdvancedOptions:
+      #   Key : Value
+      AdvancedSecurityOptions:
+        Enabled: true
+        InternalUserDatabaseEnabled: true
+        MasterUserOptions:
+          # MasterUserARN: arn:aws:iam::996208533033:role/LambdaMasterUserRole
+          MasterUserName: <Username>
+          MasterUserPassword: <Password>
+      # CognitoOptions:
+      #   CognitoOptions
+      DomainEndpointOptions:
+        EnforceHTTPS: true
+      DomainName: photos
+      EBSOptions:
+        EBSEnabled: true
+        VolumeSize: 10
+        VolumeType: gp2
+      ElasticsearchClusterConfig:
+        InstanceCount: 5
+        InstanceType: t3.small.elasticsearch
+      ElasticsearchVersion: 7.9
+      EncryptionAtRestOptions:
+        Enabled: true
+      NodeToNodeEncryptionOptions:
+        Enabled: true
+
+  VoiceControlledRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      # ApiKeySourceType: String
+      # BinaryMediaTypes:
+      #   - String
+      # Body: Json
+      BodyS3Location:
+        Bucket: 'lambda-bucket-assignment2'
+        Key: 'ai-photo-search-swagger.yaml'
+        # Version: String
+      Description: 'Rest api having search photos and upload photos methods.'
+      Name: voice-controlled-rest-api
+      FailOnWarnings: true
+      EndpointConfiguration:
+        Types:
+          - 'REGIONAL'
+  PermissionForAPIGatewayToLF2:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt LambdaFunctionLF2.Arn
+      Principal: apigateway.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !Join
+        - ''
+        - - 'arn:aws:apigateway:us-east-1::/restapis/'
+          - !Ref VoiceControlledRestApi
+          - '/resources/*/methods/GET'
+
+  VoiceControlledApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      Description: The v1 deployment of search photos
+      RestApiId: !Ref VoiceControlledRestApi
+      StageName: v1
